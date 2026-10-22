@@ -2,6 +2,7 @@
 
 A floating dial timer for Windows. Drag the ring to set minutes, drag the
 center to move it, and it docks to screen corners and edges.
+this is made with claude
 
 ## Download
 
