@@ -1,0 +1,32 @@
+{
+  "name": "dial-timer",
+  "version": "1.0.0",
+  "description": "A draggable dial timer",
+  "author": "haydaze",
+  "main": "main.js",
+    "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.15.3"
+  },
+    "build": {
+    "appId": "com.dialtimer.app",
+    "productName": "Dial Timer",
+    "files": ["main.js", "preload.js", "index.html", "package.json"],
+    "directories": { "output": "release" },
+    "win": {
+      "target": ["nsis", "portable"]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "Dial Timer Setup ${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Dial Timer ${version} portable.${ext}"
+    }
+  }
+}

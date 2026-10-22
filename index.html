@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root {
+      --bg: #15181c;
+      --tick-off: #4a4f57;
+      --tick-on: #2fe65b;
+      --text: #ffffff;
+      --muted: #9aa0a8;
+    }
+
+    html, body {
+      margin: 0;
+      background: transparent;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    /* The big round dial: 240 x 240, centered in the 260 x 260 window */
+       .dial {
+      position: absolute;
+      left: 10px;
+      top: 10px;
+      width: 240px;
+      height: 240px;
+      border-radius: 50%;
+      background: var(--bg);
+      border: 1px solid #2a2f36;
+      box-sizing: border-box;
+    }
+
+    /* One tick mark. JavaScript creates 36 of these and rotates each one. */
+    .tick {
+      position: absolute;
+      left: 50%;
+      top: 14px;
+      width: 5px;
+      height: 18px;
+      margin-left: -2.5px;
+      border-radius: 3px;
+      background: var(--tick-off);
+      transform-origin: 50% 105px; /* rotate around the dial's center */
+    }
+    .tick.on {
+      background: var(--tick-on);
+      box-shadow: 0 0 6px var(--tick-on);
+    }
+
+    /* The small green triangle */
+    .marker {
+      position: absolute;
+      left: 50%;
+      top: 2px;
+      margin-left: -6px;
+      width: 0;
+      height: 0;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-top: 10px solid var(--tick-on);
+      transform-origin: 50% 118px;
+    }
+
+    /* The center circle */
+       .center {
+      position: absolute;
+      pointer-events: none;
+      left: 50%;
+      top: 50%;
+      width: 84px;
+      height: 84px;
+      margin: -42px 0 0 -42px;
+      border-radius: 50%;
+      border: 1px solid #3a3f47;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: "Segoe UI", Arial, sans-serif;
+    }
+        .led {
+      width: 8px;
+      height: 8px;
+      margin-bottom: 3px;
+      border-radius: 50%;
+      background: var(--tick-off);
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+    .led.on {
+      background: var(--tick-on);
+      box-shadow: 0 0 8px var(--tick-on);
+    }
+    .value { color: var(--text); font-size: 20px; font-weight: 700; line-height: 26px; font-variant-numeric: tabular-nums; }
+    .unit  { color: var(--muted); font-size: 8px; letter-spacing: 1px; }
+        /* A quick squeeze-and-release when the dial docks */
+    @keyframes snap-pulse {
+      0%   { transform: scale(1); }
+      40%  { transform: scale(0.965); }
+      100% { transform: scale(1); }
+    }
+    .dial.snapped { animation: snap-pulse 0.28s ease-out; }
+        /* Flashing glow while the alarm rings */
+    @keyframes alarm-flash {
+      0%, 100% { border-color: #2a2f36; box-shadow: 0 0 0 0 rgba(47, 230, 91, 0); }
+      50%      { border-color: #2fe65b; box-shadow: 0 0 14px 3px rgba(47, 230, 91, 0.7); }
+    }
+    .dial.alarm { animation: alarm-flash 0.7s ease-in-out infinite; }
+  </style>
+</head>
+<body>
+
+  <div class="dial" id="dial">
+    <div class="marker" id="marker"></div>
+    <div class="center">
+      <div class="led" id="led"></div>
+      <div class="value" id="value">10:00</div>
+      <div class="unit" id="unit">MIN:SEC</div>
+    </div>
+  </div>
+  
+
+        <script>
+    // ---- SETTINGS ----
+    const MAX_TICKS = 36;
+    const TICK_STEP = 10;
+    const FULL_DIAL_SECONDS = 3600;
+    const RING_INNER = 78;
+
+    // ---- DOCK LAYOUTS (must match main.js) ----
+    const LAYOUTS = {
+      'free':         { start: 0,   span: 360, cx: 130, cy: 130, sx:  0, sy:  0 },
+      'left':         { start: 0,   span: 180, cx: 0,   cy: 130, sx:  1, sy:  0 },
+      'right':        { start: 180, span: 180, cx: 130, cy: 130, sx: -1, sy:  0 },
+      'top':          { start: 90,  span: 180, cx: 130, cy: 0,   sx:  0, sy:  1 },
+      'bottom':       { start: 270, span: 180, cx: 130, cy: 130, sx:  0, sy: -1 },
+      'top-left':     { start: 90,  span: 90,  cx: 0,   cy: 0,   sx:  1, sy:  1 },
+      'top-right':    { start: 180, span: 90,  cx: 130, cy: 0,   sx: -1, sy:  1 },
+      'bottom-left':  { start: 0,   span: 90,  cx: 0,   cy: 130, sx:  1, sy: -1 },
+      'bottom-right': { start: 270, span: 90,  cx: 130, cy: 130, sx: -1, sy: -1 }
+    };
+    let layout = LAYOUTS['free'];
+    let tickCount = MAX_TICKS;
+
+    // ---- TIMER STATE ----
+    let setSeconds = 10 * 60;
+    let remainingMs = setSeconds * 1000;
+    let running = false;
+    let endTime = 0;
+    let intervalId = null;
+
+    // ---- ALARM STATE ----
+    let alarming = false;
+    let alarmTimer = null;
+    let alarmBursts = 0;
+    let soundOn = true;
+    let audioCtx = null;
+
+    const dial = document.getElementById('dial');
+    const marker = document.getElementById('marker');
+    const valueText = document.getElementById('value');
+    const unitText = document.getElementById('unit');
+    const led = document.getElementById('led');
+    const centerBox = document.querySelector('.center');
+
+    // ---- BUILD THE TICKS ----
+    const ticks = [];
+    for (let i = 0; i < MAX_TICKS; i++) {
+      const tick = document.createElement('div');
+      tick.className = 'tick';
+      dial.insertBefore(tick, marker);
+      ticks.push(tick);
+    }
+
+    // ---- DOCK LAYOUT ----
+    function applyLayout(state) {
+      layout = LAYOUTS[state] || LAYOUTS['free'];
+      const full = layout.span === 360;
+
+      dial.style.left = (layout.cx - 120) + 'px';
+      dial.style.top = (layout.cy - 120) + 'px';
+
+      tickCount = Math.round(layout.span / TICK_STEP);
+      ticks.forEach((tick, i) => {
+        tick.style.display = i < tickCount ? 'block' : 'none';
+        const a = layout.start + (i + (full ? 0 : 0.5)) * TICK_STEP;
+        tick.style.transform = 'rotate(' + a + 'deg)';
+      });
+
+      const shift = 38;
+      const scale = full ? 1 : 0.75;
+      centerBox.style.transform =
+        'translate(' + (layout.sx * shift) + 'px,' + (layout.sy * shift) + 'px) scale(' + scale + ')';
+
+      document.body.dataset.dock = state;
+      render();
+    }
+
+    // ---- DRAW THE DIAL ----
+    function render() {
+      led.classList.toggle('on', running);
+      const remainingSec = remainingMs / 1000;
+      const f = Math.min(1, remainingSec / FULL_DIAL_SECONDS);
+
+      ticks.forEach((tick, i) => {
+        const lit = alarming || (f > 0 && i < tickCount && (i / tickCount) <= f + 0.0001);
+        tick.classList.toggle('on', lit);
+      });
+
+      marker.style.transform = 'rotate(' + (layout.start + f * layout.span) + 'deg)';
+      marker.style.visibility = f > 0 ? 'visible' : 'hidden';
+
+      const totalSec = Math.ceil(remainingSec);
+      const mm = Math.floor(totalSec / 60);
+      const ss = totalSec % 60;
+      valueText.textContent = mm + ':' + String(ss).padStart(2, '0');
+      unitText.textContent = alarming ? 'TIME UP' : 'MIN:SEC';
+    }
+
+    // ---- ALARM ----
+    function beep(delay) {
+      if (!soundOn) return;
+      try {
+        if (!audioCtx) audioCtx = new AudioContext();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const t = audioCtx.currentTime + delay;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.linearRampToValueAtTime(0.3, t + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.2);
+      } catch (err) { /* if sound fails, the flashing still works */ }
+    }
+
+    function alarmBurst() {      // three quick beeps
+      beep(0);
+      beep(0.25);
+      beep(0.5);
+    }
+
+    function startAlarm() {
+      if (alarming) return;
+      alarming = true;
+      dial.classList.add('alarm');
+      window.dialApi.alarmFired();       // brings the dial back if it was hidden
+      alarmBurst();
+      alarmBursts = 1;
+      alarmTimer = setInterval(() => {
+        if (alarmBursts >= 6) {          // about 9 seconds, then give up quietly
+          dismissAlarm();
+          return;
+        }
+        alarmBurst();
+        alarmBursts++;
+      }, 1500);
+      render();
+    }
+
+    function dismissAlarm() {
+      if (!alarming) return;
+      alarming = false;
+      clearInterval(alarmTimer);
+      alarmTimer = null;
+      dial.classList.remove('alarm');
+      resetTimer();                      // shows the time you set again
+    }
+
+    // ---- TIMER CONTROLS ----
+    function update() {
+      remainingMs = endTime - Date.now();
+      if (remainingMs <= 0) {
+        remainingMs = 0;
+        stopRunning();
+        render();
+        startAlarm();
+        return;
+      }
+      render();
+    }
+
+    function startTimer() {
+      if (remainingMs <= 0) remainingMs = setSeconds * 1000;
+      endTime = Date.now() + remainingMs;
+      running = true;
+      intervalId = setInterval(update, 100);
+      render();
+    }
+
+    function stopRunning() {
+      clearInterval(intervalId);
+      intervalId = null;
+      running = false;
+    }
+
+    function pauseTimer() {
+      remainingMs = Math.max(0, endTime - Date.now());
+      stopRunning();
+      render();
+    }
+
+    function resetTimer() {
+      stopRunning();
+      remainingMs = setSeconds * 1000;
+      render();
+    }
+
+    function changeMinutes(delta) {
+      if (running) return;
+      const newMinutes = Math.min(60, Math.max(1, Math.round(setSeconds / 60) + delta));
+      setSeconds = newMinutes * 60;
+      remainingMs = setSeconds * 1000;
+      window.dialApi.saveMinutes(newMinutes);
+      render();
+    }
+
+    // ---- KEYBOARD (Space = start/pause, R = reset, Up/Down = +/- 1 minute) ----
+    document.addEventListener('keydown', (e) => {
+      if (alarming) {                    // any key silences the alarm
+        e.preventDefault();
+        dismissAlarm();
+        return;
+      }
+      if (e.code === 'Space') {
+        e.preventDefault();
+        running ? pauseTimer() : startTimer();
+      } else if (e.key === 'r' || e.key === 'R') {
+        resetTimer();
+      } else if (e.key === 'ArrowUp') {
+        changeMinutes(1);
+      } else if (e.key === 'ArrowDown') {
+        changeMinutes(-1);
+      }
+    });
+
+    // ---- MOUSE ----
+    let draggingRing = false;
+    let draggingCenter = false;
+    let lastDragMinutes = 10;
+
+    function pointerInfo(e) {
+      const r = dial.getBoundingClientRect();
+      const dx = e.clientX - (r.left + r.width / 2);
+      const dy = e.clientY - (r.top + r.height / 2);
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      let angle = Math.atan2(dx, -dy) * 180 / Math.PI;
+      if (angle < 0) angle += 360;
+      return { distance, angle };
+    }
+
+    function isOnRing(distance) {
+      return distance >= RING_INNER && distance <= 120;
+    }
+
+    function setMinutesFromAngle(angle) {
+      const rel = (angle - layout.start + 360) % 360;
+      let m;
+
+      if (layout.span === 360) {
+        m = Math.round(rel / 6);
+        if (m === 0) m = lastDragMinutes > 30 ? 60 : 1;
+        if (lastDragMinutes <= 10 && m >= 50) m = 1;
+        else if (lastDragMinutes >= 50 && m <= 10) m = 60;
+      } else if (rel <= layout.span) {
+        m = Math.round(rel / layout.span * 60);
+      } else {
+        m = (rel - layout.span) < (360 - layout.span) / 2 ? 60 : 1;
+      }
+
+      m = Math.min(60, Math.max(1, m));
+      lastDragMinutes = m;
+
+      setSeconds = m * 60;
+      remainingMs = setSeconds * 1000;
+      if (running) endTime = Date.now() + remainingMs;
+      window.dialApi.saveMinutes(m);
+      render();
+    }
+
+    dial.addEventListener('pointerdown', (e) => {
+      if (alarming) {                    // a click silences the alarm
+        dismissAlarm();
+        return;
+      }
+      if (e.button !== 0) return;
+      const { distance, angle } = pointerInfo(e);
+      dial.setPointerCapture(e.pointerId);
+
+      if (isOnRing(distance)) {
+        draggingRing = true;
+        lastDragMinutes = Math.round(setSeconds / 60);
+        setMinutesFromAngle(angle);
+      } else if (distance < RING_INNER) {
+        draggingCenter = true;
+        window.dialApi.dragStart();
+      }
+    });
+
+    dial.addEventListener('pointermove', (e) => {
+      const { distance, angle } = pointerInfo(e);
+      if (draggingRing) {
+        setMinutesFromAngle(angle);
+      } else if (!draggingCenter) {
+        dial.style.cursor = isOnRing(distance) ? 'pointer'
+                          : (distance < RING_INNER ? 'move' : 'default');
+      }
+    });
+
+    function endDrags(e) {
+      if (draggingCenter) window.dialApi.dragEnd();
+      draggingRing = false;
+      draggingCenter = false;
+      if (e && e.pointerId !== undefined && dial.hasPointerCapture(e.pointerId)) {
+        dial.releasePointerCapture(e.pointerId);
+      }
+    }
+    dial.addEventListener('pointerup', endDrags);
+    dial.addEventListener('pointercancel', endDrags);
+    window.addEventListener('blur', () => endDrags());
+
+    // Right-click opens the menu (Hide, Reset position, Alarm sound, Quit)
+    document.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      window.dialApi.showMenu();
+    });
+
+    // ---- MESSAGES FROM THE APP ----
+    window.dialApi.onDockState((state) => {
+      applyLayout(state);
+      if (state !== 'free') {
+        dial.classList.remove('snapped');
+        void dial.offsetWidth;
+        dial.classList.add('snapped');
+      }
+    });
+    dial.addEventListener('animationend', (e) => {
+      if (e.animationName === 'snap-pulse') dial.classList.remove('snapped');
+    });
+
+    window.dialApi.onSoundState((on) => { soundOn = on; });
+
+    // Load the saved minutes and sound setting
+    window.dialApi.getSettings().then((s) => {
+      soundOn = s.sound;
+      if (!running) {
+        setSeconds = s.minutes * 60;
+        remainingMs = setSeconds * 1000;
+        lastDragMinutes = s.minutes;
+        render();
+      }
+    }).catch(() => {});
+
+    applyLayout('free');
+  </script>
+</body>
+</html>
